@@ -1,0 +1,34 @@
+commit c4a048331603a3fe19c886498e957f5f2a577ed9
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Thu Nov 20 16:30:20 2014 -0500
+
+    PR17126: put hcall_* kernel tracepoints into blacklist for powerpc
+    
+    * tapsets.cxx (tracepoint_query::handle_query_func): Implement
+      baby blacklist.
+
+diff --git a/tapsets.cxx b/tapsets.cxx
+index 6e2bae5..0b4e0d8 100644
+--- a/tapsets.cxx
++++ b/tapsets.cxx
+@@ -10900,6 +10900,20 @@ tracepoint_query::handle_query_func(Dwarf_Die * func)
+   if (!probed_names.insert(tracepoint_instance).second)
+     return DWARF_CB_OK;
+ 
++  // PR17126: blacklist
++  if (!sess.guru_mode)
++    {
++      if ((sess.architecture.substr(0,3) == "ppc" ||
++           sess.architecture.substr(0,7) == "powerpc") &&
++          (tracepoint_instance == "hcall_entry" ||
++           tracepoint_instance == "hcall_exit"))
++        {
++          sess.print_warning(_F("tracepoint %s is blacklisted on architecture %s",
++                                tracepoint_instance.c_str(), sess.architecture.c_str()));
++          return DWARF_CB_OK;
++        }
++  }
++
+   derived_probe *dp = new tracepoint_derived_probe (dw.sess, dw, *func,
+                                                     tracepoint_instance,
+                                                     base_probe, base_loc);

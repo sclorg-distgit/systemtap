@@ -1,0 +1,28 @@
+commit a1a230af2ea557ed7a9fcd9485ac16278dbdf778
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Thu Oct 16 16:25:55 2014 -0400
+
+    RHBZ1153673: speculatively correct segv in dead_control_remover
+    
+    It was reported that ::visit_block was occasionally called with
+    a 0-size input vs[].  That leads to an array overflow, as the
+    for condition becomes apprx. (i < UINT_MAX).
+    
+       for (size_t i = 0; i < vs.size() - 1; ++i)
+         do_something_with (vs[i]);
+    
+    Let's reject 0-size vectors right away.
+
+diff --git a/elaborate.cxx b/elaborate.cxx
+index fa90fe7..35109ab 100644
+--- a/elaborate.cxx
++++ b/elaborate.cxx
+@@ -4041,6 +4041,8 @@ struct dead_control_remover: public traversing_visitor
+ void dead_control_remover::visit_block (block* b)
+ {
+   vector<statement*>& vs = b->statements;
++  if (vs.size() == 0) /* else (size_t) size()-1 => very big */
++    return;
+   for (size_t i = 0; i < vs.size() - 1; ++i)
+     {
+       vs[i]->visit (this);

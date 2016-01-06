@@ -1,0 +1,96 @@
+commit f73985072571f93684e7742733d8d06b477b02bf
+Author: David Smith <dsmith@redhat.com>
+Date:   Mon Dec 8 14:04:19 2014 -0600
+
+    Fix BZ1171823 by updating the __svc_fh() nfsd tapset function.
+    
+    * tapset/linux/nfsd.stp: Rewrite __svc_fh() in systemtap script language
+      instead of embedded-C to get around the disappearance of struct svc_fh's
+      declaration from a public kernel header file.
+
+diff --git a/tapset/linux/nfsd.stp b/tapset/linux/nfsd.stp
+index 701a81d..7ec2856 100644
+--- a/tapset/linux/nfsd.stp
++++ b/tapset/linux/nfsd.stp
+@@ -38,22 +38,23 @@
+  *15 :nfsd.proc3.rename.tfh
+  */
+ 
+-/*Get file handler from struct svc_fh */
+-function __svc_fh:string(fh :long) %{  /* pure */
+-	struct svc_fh * fhp = (struct svc_fh *) (unsigned long)(STAP_ARG_fh);
+-	struct knfsd_fh *fh = &fhp->fh_handle;
+-
+-	snprintf(STAP_RETVALUE, MAXSTRINGLEN,
+-			"%d: %08x %08x %08x %08x %08x %08x",
+-			kread(&(fh->fh_size)),
+-			kread(&(fh->fh_base.fh_pad[0])),
+-			kread(&(fh->fh_base.fh_pad[1])),
+-			kread(&(fh->fh_base.fh_pad[2])),
+-			kread(&(fh->fh_base.fh_pad[3])),
+-			kread(&(fh->fh_base.fh_pad[4])),
+-			kread(&(fh->fh_base.fh_pad[5])));
+-	CATCH_DEREF_FAULT();
+-%}
++@define __svc_fh_cast(fhp)
++%(
++	@cast(@fhp, "svc_fh", "kernel:nfsd")->fh_handle
++%)
++
++/* Get file handler data from struct svc_fh */
++function __svc_fh:string(fhp:long)
++{
++	return sprintf("%d: %08x %08x %08x %08x %08x %08x",
++			@__svc_fh_cast(fhp)->fh_size,
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[0],
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[1],
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[2],
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[3],
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[4],
++			@__svc_fh_cast(fhp)->fh_base->fh_pad[5])
++}
+ 
+ function nfs3_cmode:string(cmode:long) %{ /* pure */
+ 	int cmode = (int)(long)STAP_ARG_cmode;
+
+commit 957812abcb03ad5eb2b544c7fff111b967deb211
+Author: David Smith <dsmith@redhat.com>
+Date:   Mon Dec 8 16:17:06 2014 -0600
+
+    BZ117823: Simplify fix using typed-integers.
+    
+    * tapset/linux/nfsd.stp: Simplify __svc_fh() fix which removes macro.
+
+diff --git a/tapset/linux/nfsd.stp b/tapset/linux/nfsd.stp
+index 7ec2856..7aebb9c 100644
+--- a/tapset/linux/nfsd.stp
++++ b/tapset/linux/nfsd.stp
+@@ -38,22 +38,14 @@
+  *15 :nfsd.proc3.rename.tfh
+  */
+ 
+-@define __svc_fh_cast(fhp)
+-%(
+-	@cast(@fhp, "svc_fh", "kernel:nfsd")->fh_handle
+-%)
+-
+-/* Get file handler data from struct svc_fh */
++/* Get file handle data from struct svc_fh. */
+ function __svc_fh:string(fhp:long)
+ {
+-	return sprintf("%d: %08x %08x %08x %08x %08x %08x",
+-			@__svc_fh_cast(fhp)->fh_size,
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[0],
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[1],
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[2],
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[3],
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[4],
+-			@__svc_fh_cast(fhp)->fh_base->fh_pad[5])
++	svc_fh = &@cast(fhp, "svc_fh", "kernel:nfsd")->fh_handle
++	return sprintf("%d: %08x %08x %08x %08x %08x %08x", svc_fh->fh_size,
++		       svc_fh->fh_base->fh_pad[0], svc_fh->fh_base->fh_pad[1],
++		       svc_fh->fh_base->fh_pad[2], svc_fh->fh_base->fh_pad[3],
++		       svc_fh->fh_base->fh_pad[4], svc_fh->fh_base->fh_pad[5])
+ }
+ 
+ function nfs3_cmode:string(cmode:long) %{ /* pure */
