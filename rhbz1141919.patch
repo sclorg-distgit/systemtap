@@ -1,0 +1,41 @@
+commit f48e4f1c41b8d5e6fbee05500f59a5367b964193 (HEAD, master)
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Fri Sep 19 15:58:00 2014 -0400
+
+    staplog.c: add some more per-arch macros w/ protection
+    
+    Some platforms define PPC etc. before staplog.c, so we must
+    not conflict.  Some new platforms need to be listed.
+
+diff --git a/staplog.c b/staplog.c
+index 809405305e63..18217b633e61 100644
+--- a/staplog.c
++++ b/staplog.c
+@@ -22,6 +22,10 @@
+ 
+ /* crash/defs.h defines NR_CPUS based upon architecture macros
+    X86, X86_64, etc.  See crash/configure.c (!). */
++#if !defined(X86) && !defined(X86_64) && !defined(ALPHA) && !defined(PPC) && \
++    !defined(IA64) && !defined(PPC64) && !defined(S390) && !defined(S390X) && \
++    !defined(ARM) && !defined(ARM64)
++
+ #if defined(__alpha__)
+ #define ALPHA
+ #elif defined(__x86_64__)
+@@ -38,12 +42,16 @@
+ #define S390X
+ #elif defined(__s390__)
+ #define S390
++#elif defined(__aarch64__)
++#define ARM64
+ #elif defined(__arm__)
+ #define ARM
+ #else
+ #warn "unknown architecture for crash/staplog support"
+ #endif
+ 
++#endif
++
+ #include <crash/defs.h>
+ 
+ struct rchan_offsets {

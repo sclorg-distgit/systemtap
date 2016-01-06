@@ -1,0 +1,21 @@
+commit 69f0706dd69bd83dfa649246e695c682a6018790
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Fri Nov 14 15:04:53 2014 -0500
+
+    runtime: fix kernel relocation basis symbol on ppc64le
+    
+    It's _stext, not .__start (as on normal ppc64).
+
+diff --git a/runtime/k_syms.h b/runtime/k_syms.h
+index 5e3db1d..ef80fbd 100644
+--- a/runtime/k_syms.h
++++ b/runtime/k_syms.h
+@@ -1,7 +1,7 @@
+ #ifndef _K_SYMS_H_
+ #define _K_SYMS_H_
+ 
+-#ifdef __powerpc64__
++#if defined(__powerpc64__) && !_LITTLE_ENDIAN
+ #define KERNEL_RELOC_SYMBOL ".__start"
+ #else
+ #define KERNEL_RELOC_SYMBOL "_stext"

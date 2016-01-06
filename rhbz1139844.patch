@@ -1,0 +1,58 @@
+From c486eff3f809b5ce544d5a032198e7680f2b7f2b Mon Sep 17 00:00:00 2001
+From: Stan Cox <scox@redhat.com>
+Date: Tue, 9 Sep 2014 15:07:44 -0400
+Subject: [PATCH] Add -fpic -fPIC to the list of accepted but ignored dtrace
+ options.
+
+* dtrace.in (main):  Add ignore_options.
+---
+ dtrace.in                           | 4 +++-
+ testsuite/systemtap.base/dtrace.exp | 8 ++++----
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/dtrace.in b/dtrace.in
+index d5f189d4fc9e..2f9fb6307e28 100644
+--- a/dtrace.in
++++ b/dtrace.in
+@@ -305,6 +305,8 @@ def main():
+     s_filename = ""
+     includes = []
+     defines = []
++    ignore_options = ["-64", "-32", "-fpic", "-fPIC"]
++
+     while i < len(sys.argv):
+         if sys.argv[i] == "-o":
+             i += 1
+@@ -330,7 +332,7 @@ def main():
+             HAVE_PYP = False
+         elif sys.argv[i] == "--types":
+             print sys.argv[0] + ": note: obsolete option --types used"
+-        elif sys.argv[i] == "-64" or sys.argv[i] == "-32":
++        elif sys.argv[i] in ignore_options:
+             pass                # dtrace users sometimes pass these flags
+         elif sys.argv[i] == "--help":
+             dtrace_help()
+diff --git a/testsuite/systemtap.base/dtrace.exp b/testsuite/systemtap.base/dtrace.exp
+index 252dad90ede5..e029748100d6 100644
+--- a/testsuite/systemtap.base/dtrace.exp
++++ b/testsuite/systemtap.base/dtrace.exp
+@@ -53,12 +53,12 @@ set incpath "/tmp/dtrace_inc"
+ # -----------------------------------------------------------------
+ # test command line option and file handling 
+ 
+-verbose -log "$dtrace -G -s $dpath -o XXX.o"
+-catch {exec $dtrace -G -s $dpath -o XXX.o}
++verbose -log "$dtrace -G -64 -fPIC -s $dpath -o XXX.o"
++catch {exec $dtrace -G -64 -fPIC -s $dpath -o XXX.o}
+ if {[file exists XXX.o]} then {
+-    pass "dtrace -G -o XXX.o"
++    pass "dtrace -G -64 -fPIC -o XXX.o"
+ } else {
+-    fail "dtrace -G -o XXX.o"
++    fail "dtrace -G -64 -fPIC -o XXX.o"
+ }
+ exec rm -f XXX.o
+ 
+-- 
+1.9.3
+
