@@ -2,7 +2,7 @@
 %global sysconfdir %{?scl:%_root_sysconfdir}%{!?scl:%_sysconfdir}
 
 %{!?with_sqlite: %global with_sqlite 1}
-%{!?with_docs: %global with_docs 1}
+%{!?with_docs: %global with_docs 0}
 # crash is not available
 %ifarch ppc ppc64 %{sparc} aarch64 ppc64le
 %{!?with_crash: %global with_crash 0}
@@ -15,7 +15,6 @@
 %{!?pie_supported: %global pie_supported 1}
 %{!?with_boost: %global with_boost 0}
 %{!?with_dyninst: %global with_dyninst 1}
-%{!?with_emacsvim: %global with_emacsvim 0}
 %{!?with_systemd: %global with_systemd 0} # disable even on rhel7
 %{!?with_emacsvim: %global with_emacsvim 0}
 %{!?with_java: %global with_java 0}
@@ -48,12 +47,13 @@
 %define dracutstap %{dracutlibdir}/modules.d/99%{scl_prefix}stap
 
 Name: %{?scl_prefix}systemtap
-Version: 2.8
-Release: 4%{?dist}
+Version: 2.9
+Release: 3s%{?dist}
 # for version, see also configure.ac
 
-Patch1: rhbz1237098.patch
-Patch2: june-robust.patch
+# NB Patch1 is for elfutils, further below
+Patch2: systemtap-2.9-dyninst-9.1.patch
+Patch3: systemtap-2.9-pr19525-bulk-sigusr2.patch
 
 # Packaging abstract:
 #
@@ -268,7 +268,7 @@ Requires: %{?scl_prefix}systemtap = %{version}-%{release}
 Requires: %{?scl_prefix}systemtap-sdt-devel = %{version}-%{release}
 Requires: %{?scl_prefix}systemtap-server = %{version}-%{release}
 Requires: %{?scl_prefix}elfutils
-Requires: dejagnu which prelink grep nc
+Requires: dejagnu which grep nc
 Requires: gcc gcc-c++ make glibc-devel
 # testsuite/systemtap.base/ptrace.exp needs strace
 Requires: strace
@@ -303,8 +303,8 @@ systemtap on the current system.
 
 %prep
 %setup -q -n systemtap-%{version} %{?setup_elfutils}
-%patch1 -p1
 %patch2 -p1
+%patch3 -p1
 
 %if %{with_bundled_elfutils}
 cd elfutils-%{elfutils_version}
@@ -579,7 +579,7 @@ if [ $1 = 0 ] ; then
        /bin/systemctl stop stap-server.service >/dev/null 2>&1 || :
     %else
         /sbin/service %{?scl_prefix}stap-server stop >/dev/null 2>&1
-    	/sbin/chkconfig --del %{?scl_prefix}stap-server
+        /sbin/chkconfig --del %{?scl_prefix}stap-server
     %endif
 fi
 exit 0
@@ -613,7 +613,7 @@ if [ $1 = 0 ] ; then
         /bin/systemctl stop systemtap.service >/dev/null 2>&1 || :
     %else
         /sbin/service %{?scl_prefix}systemtap stop >/dev/null 2>&1
-    	/sbin/chkconfig --del %{?scl_prefix}systemtap
+        /sbin/chkconfig --del %{?scl_prefix}systemtap
     %endif
 fi
 exit 0
@@ -656,11 +656,10 @@ exit 0
 %{_libexecdir}/systemtap/stap-sign-module
 %{_libexecdir}/systemtap/stap-authorize-cert
 %{_libexecdir}/systemtap/stap-env
-%{_mandir}/man7/stappaths.7*
 %{_mandir}/man7/error*
+%{_mandir}/man7/stappaths.7*
 %{_mandir}/man7/warning*
 %{_mandir}/man8/stap-server.8*
-
 %if %{with_systemd}
 %{_unitdir}/stap-server.service
 %{_tmpfilesdir}/stap-server.conf
@@ -701,12 +700,12 @@ exit 0
 %dir %{_libdir}/systemtap
 %{_libdir}/systemtap/lib*.so*
 %endif
-
 %if %{with_emacsvim}
 %{_emacs_sitelispdir}/*.el*
 %{_emacs_sitestartdir}/systemtap-init.el
 %{_datadir}/vim/vimfiles/*/*.vim
 %endif
+
 
 %files runtime -f systemtap.lang
 %defattr(-,root,root)
@@ -719,7 +718,6 @@ exit 0
 %endif
 %dir %{_libexecdir}/systemtap
 %{_libexecdir}/systemtap/stapio
-%{_libexecdir}/systemtap/stap-env
 %{_libexecdir}/systemtap/stap-authorize-cert
 %if %{with_crash}
 %dir %{_libdir}/systemtap
@@ -765,6 +763,7 @@ exit 0
 %{_datadir}/systemtap/tapset
 
 
+
 %files initscript
 %defattr(-,root,root)
 %{sysconfdir}/rc.d/init.d/%{?scl_prefix}systemtap
@@ -805,6 +804,15 @@ exit 0
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Fri Apr 01 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-3s
+- buildroot bump
+
+* Thu Feb 25 2016 Frank Ch. Eigler <fche@redhat.com> - 2.9-2s
+- buildroot bump
+
+* Fri Jan 29 2016 Josh Stone <jistone@redhat.com> - 2.9-1s
+- rebase to upstream 2.9
+
 * Tue Jul  7 2015 Frank Ch. Eigler <fche@redhat.com> - 2.8-4
 - rhbz1224363 (rebase to upstream 2.8+)
 
