@@ -1,0 +1,96 @@
+commit fd5d795795e5b6266bb2b3ab827bd576fef402fe
+Author: Josh Stone <jistone@redhat.com>
+Date:   Fri Jan 15 12:02:56 2016 -0800
+
+    Cherry-pick two upstream commits for Dyninst 9.1 support
+    
+    commit f3cced187103a83a8367bf7b61ff93007064586d
+    Author: Josh Stone <jistone@redhat.com>
+    Date:   Thu Dec 10 19:17:56 2015 -0800
+    
+        stapdyn: prepare for the dyninst 9.1 library callback change
+    
+        The new API uses BPatch_object for the callback, because modules (~=CUs)
+        are now fully represented in shared objects too.  This is better, but we
+        need to keep fallback code for the old API too, using module->getObject().
+    
+     stapdyn/mutator.cxx | 23 +++++++++++++++++------
+     stapdyn/mutator.h   |  2 +-
+     2 files changed, 18 insertions(+), 7 deletions(-)
+    
+    commit 162267f19c8b9356488c1bb23c8be6b61a5799a5
+    Author: Josh Stone <jistone@redhat.com>
+    Date:   Tue Dec 15 12:26:37 2015 -0800
+    
+        stapdyn: use the simpler DYNINST_9_1 macro for callback changes
+    
+     stapdyn/mutator.cxx | 2 +-
+     1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/stapdyn/mutator.cxx b/stapdyn/mutator.cxx
+index 9a7374740193..e10a73e36966 100644
+--- a/stapdyn/mutator.cxx
++++ b/stapdyn/mutator.cxx
+@@ -35,13 +35,24 @@ static vector<mutator*> g_mutators;
+ 
+ static void
+ g_dynamic_library_callback(BPatch_thread *thread,
+-                           BPatch_module *module,
++                           BPatch_object *object,
+                            bool load)
+ {
+   for (size_t i = 0; i < g_mutators.size(); ++i)
+-    g_mutators[i]->dynamic_library_callback(thread, module, load);
++    g_mutators[i]->dynamic_library_callback(thread, object, load);
+ }
+ 
++#ifndef DYNINST_9_1
++static void
++g_dynamic_module_callback(BPatch_thread *thread,
++                          BPatch_module *module,
++                          bool load)
++{
++  g_dynamic_library_callback(thread, module->getObject(), load);
++}
++#define g_dynamic_library_callback g_dynamic_module_callback
++#endif
++
+ 
+ static void
+ g_post_fork_callback(BPatch_thread *parent, BPatch_thread *child)
+@@ -666,18 +677,18 @@ mutator::find_mutatee(BPatch_process* process)
+ // Check if it matches our targets, and instrument accordingly.
+ void
+ mutator::dynamic_library_callback(BPatch_thread *thread,
+-                                  BPatch_module *module,
++                                  BPatch_object *object,
+                                   bool load)
+ {
+-  if (!load || !thread || !module)
++  if (!load || !thread || !object)
+     return;
+ 
+   BPatch_process* process = thread->getProcess();
+-  staplog(1) << "dlopen \"" << module->libraryName()
++  staplog(1) << "dlopen \"" << object->name()
+              << "\", pid = " << process->getPid() << endl;
+   boost::shared_ptr<mutatee> mut = find_mutatee(process);
+   if (mut)
+-    mut->instrument_object_dynprobes(module->getObject(), targets);
++    mut->instrument_object_dynprobes(object, targets);
+ }
+ 
+ 
+diff --git a/stapdyn/mutator.h b/stapdyn/mutator.h
+index d0e068d6d4ec..459cfc2c74ed 100644
+--- a/stapdyn/mutator.h
++++ b/stapdyn/mutator.h
+@@ -97,7 +97,7 @@ class mutator {
+     // Callback to respond to dynamically loaded libraries.
+     // Check if it matches our targets, and instrument accordingly.
+     void dynamic_library_callback(BPatch_thread *thread,
+-                                  BPatch_module *module,
++                                  BPatch_object *object,
+                                   bool load);
+ 
+     // Callback to respond to post fork events.  Check if it matches
