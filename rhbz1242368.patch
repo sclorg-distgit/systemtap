@@ -1,0 +1,338 @@
+commit 03b9fdf4ce26b4e39a3e755fc717fe4e5ab773dd
+Author: David Smith <dsmith@redhat.com>
+Date:   Thu Apr 28 10:20:47 2016 -0500
+
+    Fix PR19954 by avoiding "suspicious RCU usage" message.
+    
+    * runtime/transport/symbols.c (_stp_module_update_self): Properly handle
+      RCU locking when retrieving the 'kallsyms' member of the module
+      structure.
+
+diff --git a/runtime/transport/symbols.c b/runtime/transport/symbols.c
+index cb7964f..98b0239 100644
+--- a/runtime/transport/symbols.c
++++ b/runtime/transport/symbols.c
+@@ -249,7 +249,12 @@ static int _stp_module_update_self (void)
+ 		}
+ 		else if (!strcmp(".symtab", attr->name)) {
+ #ifdef STAPCONF_MOD_KALLSYMS
+-			struct mod_kallsyms *kallsyms = rcu_dereference_sched(mod->kallsyms);
++			struct mod_kallsyms *kallsyms;
++
++			rcu_read_lock_sched();
++			kallsyms = rcu_dereference_sched(mod->kallsyms);
++			rcu_read_unlock_sched();
++
+ 			if (attr->address == (unsigned long) kallsyms->symtab)
+ 				_stp_module_self.sections[0].size =
+ 					kallsyms->num_symtab * sizeof(kallsyms->symtab[0]);
+commit c8db32343c9b8012fa348cf4f8f104617960f793
+Author: David Smith <dsmith@redhat.com>
+Date:   Thu Apr 28 10:59:50 2016 -0500
+
+    Improved fake utrace locking.
+    
+    * runtime/stp_utrace.c: Fixed potential locking issues by changing the
+      'task_work_added' and 'report_work_added' members of 'struct
+      utrace' to be atomic variables. In the process, I also renamed
+      'task_work_added' to 'resume_work_added'. As atomice variables, they can
+      be modified without locking the utrace struct. Also renamed the 'work'
+      member of 'struct utrace' to 'resume_work' (to match up with
+      'resume_work_added').
+
+diff --git a/runtime/stp_utrace.c b/runtime/stp_utrace.c
+index a8afc0d..bb2d663 100644
+--- a/runtime/stp_utrace.c
++++ b/runtime/stp_utrace.c
+@@ -66,17 +66,23 @@ struct utrace {
+ 	unsigned int vfork_stop:1; /* need utrace_stop() before vfork wait */
+ 	unsigned int death:1;	/* in utrace_report_death() now */
+ 	unsigned int reap:1;	/* release_task() has run */
+-	unsigned int pending_attach:1; /* need splice_attaching() */
+-	unsigned int task_work_added:1; /* called task_work_add() on 'work' */
+-	unsigned int report_work_added:1; /* called task_work_add()
+-					   * on 'report_work' */
++	unsigned int pending_attach:1;	/* need splice_attaching() */
++
++	/* We need the '*_work_added' variables to be atomic so they
++	 * can be modified without locking the utrace struct. This is
++	 * typically done in atomic context where we can't grab the
++	 * lock. */
++	atomic_t resume_work_added;	/* called task_work_add() on
++					 * 'resume_work' */
++	atomic_t report_work_added;	/* called task_work_add() on
++					 * 'report_work' */
+ 
+ 	unsigned long utrace_flags;
+ 
+ 	struct hlist_node hlist;       /* task_utrace_table linkage */
+ 	struct task_struct *task;
+ 
+-	struct task_work work;
++	struct task_work resume_work;
+ 	struct task_work report_work;
+ };
+ 
+@@ -349,17 +355,20 @@ static int utrace_exit(void)
+ static void
+ stp_task_notify_resume(struct task_struct *target, struct utrace *utrace)
+ {
+-	if (! utrace->task_work_added) {
+-		int rc = stp_task_work_add(target, &utrace->work);
+-		if (rc == 0) {
+-			utrace->task_work_added = 1;
+-		}
+-		/* stp_task_work_add() returns -ESRCH if the task has
+-		 * already passed exit_task_work(). Just ignore this
+-		 * error. */
+-		else if (rc != -ESRCH) {
+-			printk(KERN_ERR "%s:%d - task_work_add() returned %d\n",
+-			       __FUNCTION__, __LINE__, rc);
++	if (atomic_add_unless(&utrace->resume_work_added, 1, 1)) {
++		int rc = stp_task_work_add(target, &utrace->resume_work);
++		if (rc != 0) {
++			atomic_set(&utrace->report_work_added, 0);
++
++			/* stp_task_work_add() returns -ESRCH if the
++			 * task has already passed
++			 * exit_task_work(). Just ignore this
++			 * error. */
++			if (rc != -ESRCH) {
++				printk(KERN_ERR
++				       "%s:%d - task_work_add() returned %d\n",
++				       __FUNCTION__, __LINE__, rc);
++			}
+ 		}
+ 	}
+ }
+@@ -394,8 +403,9 @@ static void utrace_cleanup(struct utrace *utrace)
+ 	    list_del(&engine->entry);
+ 	    kmem_cache_free(utrace_engine_cachep, engine);
+ 	}
++	stp_spin_unlock(&utrace->lock);
+ 
+-	if (utrace->task_work_added) {
++	if (atomic_add_unless(&utrace->resume_work_added, -1, 0)) {
+ #ifdef STP_TF_DEBUG
+ 		if (stp_task_work_cancel(utrace->task, &utrace_resume) == NULL)
+ 			printk(KERN_ERR "%s:%d - task_work_cancel() failed? task %p, %d, %s\n",
+@@ -406,9 +416,8 @@ static void utrace_cleanup(struct utrace *utrace)
+ #else
+ 		stp_task_work_cancel(utrace->task, &utrace_resume);
+ #endif
+-		utrace->task_work_added = 0;
+ 	}
+-	if (utrace->report_work_added) {
++	if (atomic_add_unless(&utrace->report_work_added, -1, 0)) {
+ #ifdef STP_TF_DEBUG
+ 		if (stp_task_work_cancel(utrace->task, &utrace_report_work) == NULL)
+ 			printk(KERN_ERR "%s:%d - task_work_cancel() failed? task %p, %d, %s\n",
+@@ -419,9 +428,7 @@ static void utrace_cleanup(struct utrace *utrace)
+ #else
+ 		stp_task_work_cancel(utrace->task, &utrace_report_work);
+ #endif
+-		utrace->report_work_added = 0;
+ 	}
+-	stp_spin_unlock(&utrace->lock);
+ 
+ 	/* Free the struct utrace itself. */
+ 	kmem_cache_free(utrace_cachep, utrace);
+@@ -522,8 +529,10 @@ static bool utrace_task_alloc(struct task_struct *task)
+ 	INIT_LIST_HEAD(&utrace->attaching);
+ 	utrace->resume = UTRACE_RESUME;
+ 	utrace->task = task;
+-	stp_init_task_work(&utrace->work, &utrace_resume);
++	stp_init_task_work(&utrace->resume_work, &utrace_resume);
+ 	stp_init_task_work(&utrace->report_work, &utrace_report_work);
++	atomic_set(&utrace->resume_work_added, 0);
++	atomic_set(&utrace->report_work_added, 0);
+ 
+ 	stp_spin_lock(&task_utrace_lock);
+ 	u = __task_utrace_struct(task);
+@@ -558,8 +567,8 @@ static void utrace_free(struct utrace *utrace)
+ 	stp_spin_unlock(&task_utrace_lock);
+ 
+ 	/* Free the utrace struct. */
+-	stp_spin_lock(&utrace->lock);
+ #ifdef STP_TF_DEBUG
++	stp_spin_lock(&utrace->lock);
+ 	if (unlikely(utrace->reporting)
+ 	    || unlikely(!list_empty(&utrace->attached))
+ 	    || unlikely(!list_empty(&utrace->attaching)))
+@@ -567,27 +576,31 @@ static void utrace_free(struct utrace *utrace)
+ 		       __FUNCTION__, __LINE__, utrace->reporting,
+ 		       list_empty(&utrace->attached),
+ 		       list_empty(&utrace->attaching));
++	stp_spin_unlock(&utrace->lock);
+ #endif
+ 
+-	if (utrace->task_work_added) {
+-		if (stp_task_work_cancel(utrace->task, &utrace_resume) == NULL)
+-			printk(KERN_ERR "%s:%d - task_work_cancel() failed? task %p, %d, %s\n",
++	if (atomic_add_unless(&utrace->resume_work_added, -1, 0)) {
++		if ((stp_task_work_cancel(utrace->task, &utrace_resume)
++		     == NULL)
++		    && (utrace->task->flags & ~PF_EXITING)
++		    && (utrace->task->exit_state == 0))
++			printk(KERN_ERR "%s:%d * task_work_cancel() failed? task %p, %d, %s, 0x%lx 0x%x\n",
+ 			       __FUNCTION__, __LINE__, utrace->task,
+ 			       utrace->task->tgid,
+ 			       (utrace->task->comm ? utrace->task->comm
+-				: "UNKNOWN"));
+-		utrace->task_work_added = 0;
+-	}
+-	if (utrace->report_work_added) {
+-		if (stp_task_work_cancel(utrace->task, &utrace_report_work) == NULL)
+-			printk(KERN_ERR "%s:%d - task_work_cancel() failed? task %p, %d, %s\n",
++				: "UNKNOWN"), utrace->task->state, utrace->task->exit_state);
++	}
++	if (atomic_add_unless(&utrace->report_work_added, -1, 0)) {
++		if ((stp_task_work_cancel(utrace->task, &utrace_report_work)
++		     == NULL)
++		    && (utrace->task->flags & ~PF_EXITING)
++		    && (utrace->task->exit_state == 0))
++			printk(KERN_ERR "%s:%d ** task_work_cancel() failed? task %p, %d, %s, 0x%lx, 0x%x\n",
+ 			       __FUNCTION__, __LINE__, utrace->task,
+ 			       utrace->task->tgid,
+ 			       (utrace->task->comm ? utrace->task->comm
+-				: "UNKNOWN"));
+-		utrace->report_work_added = 0;
++				: "UNKNOWN"), utrace->task->state, utrace->task->exit_state);
+ 	}
+-	stp_spin_unlock(&utrace->lock);
+ 
+ 	kmem_cache_free(utrace_cachep, utrace);
+ }
+@@ -2257,7 +2270,7 @@ static void utrace_report_death(void *cb_data __attribute__ ((unused)),
+ 	 * of detach bookkeeping.
+ 	 */
+ 	if (in_atomic() || irqs_disabled()) {
+-		if (! utrace->report_work_added) {
++		if (atomic_add_unless(&utrace->report_work_added, 1, 1)) {
+ 			int rc;
+ #ifdef STP_TF_DEBUG
+ 			printk(KERN_ERR "%s:%d - adding task_work\n",
+@@ -2265,17 +2278,17 @@ static void utrace_report_death(void *cb_data __attribute__ ((unused)),
+ #endif
+ 			rc = stp_task_work_add(task,
+ 					       &utrace->report_work);
+-			if (rc == 0) {
+-				utrace->report_work_added = 1;
+-			}
+-			/* stp_task_work_add() returns -ESRCH if the
+-			 * task has already passed
+-			 * exit_task_work(). Just ignore this
+-			 * error. */
+-			else if (rc != -ESRCH) {
+-				printk(KERN_ERR
+-				       "%s:%d - task_work_add() returned %d\n",
+-				       __FUNCTION__, __LINE__, rc);
++			if (rc != 0) {
++				atomic_set(&utrace->report_work_added, 0);
++				/* stp_task_work_add() returns -ESRCH
++				 * if the task has already passed
++				 * exit_task_work(). Just ignore this
++				 * error. */
++				if (rc != -ESRCH) {
++					printk(KERN_ERR
++					       "%s:%d - task_work_add() returned %d\n",
++					       __FUNCTION__, __LINE__, rc);
++				}
+ 			}
+ 		}
+ 	}
+@@ -2337,13 +2350,13 @@ static void utrace_resume(struct task_work *work)
+ 	 * instantaneous (where 'task_utrace_struct()' has to do a
+ 	 * hash lookup).
+ 	 */
+-	struct utrace *utrace = container_of(work, struct utrace, work);
++	struct utrace *utrace = container_of(work, struct utrace, resume_work);
+ 	struct task_struct *task = current;
+ 	INIT_REPORT(report);
+ 	struct utrace_engine *engine;
+ 
+ 	might_sleep();
+-	utrace->task_work_added = 0;
++	atomic_set(&utrace->resume_work_added, 0);
+ 
+ 	/* Make sure the task isn't exiting. */
+ 	if (task->flags & PF_EXITING) {
+@@ -2436,8 +2449,8 @@ static void utrace_report_work(struct task_work *work)
+ 	       __FUNCTION__, __LINE__, in_atomic(), irqs_disabled());
+ #endif
+ 	might_sleep();
+-	utrace->report_work_added = 0;
+ 
++	atomic_set(&utrace->report_work_added, 0);
+ 	stp_spin_lock(&utrace->lock);
+ 	BUG_ON(utrace->death);
+ 	utrace->death = 1;
+commit 0859b50e3ac4782e53c4c10b82c6e24174378bd4
+Author: Mateusz Guzik <mguzik@redhat.com>
+Date:   Mon May 2 12:28:55 2016 -0500
+
+    Plug preempt leak in _stp_runtime_entryfn_put/get_context.
+    
+    If _stp_runtime_entryfn_get_context returns a context, preemption
+    counter is always incremented. On the other hand
+    _stp_runtime_entryfn_put_context only decrements the counter if the
+    passed context matches the one currently set on the cpu.
+    
+    The context can be set to NULL by _stp_runtime_contexts_free, making the
+    comparison false and in effect leading to a leak, e.g.:
+    timer: _stp_ctl_work_callback+0x0/0x1e0[stap_af8544c7eb51251ef8c
+     377abff659b05_25070] preempt leak: 00000101 -> 00000102
+
+diff --git a/runtime/linux/runtime_context.h b/runtime/linux/runtime_context.h
+index c9ffe18..9d325da 100644
+--- a/runtime/linux/runtime_context.h
++++ b/runtime/linux/runtime_context.h
+@@ -80,11 +80,12 @@ static struct context * _stp_runtime_entryfn_get_context(void)
+ 
+ static inline void _stp_runtime_entryfn_put_context(struct context *c)
+ {
+-	if (c && c == _stp_runtime_get_context()) {
+-		atomic_dec(&c->busy);
++	if (c) {
++		if (c == _stp_runtime_get_context())
++			atomic_dec(&c->busy);
++		/* else, warn about bad state? */
+ 		preempt_enable_no_resched();
+ 	}
+-	/* else, warn about bad state? */
+ 	return;
+ }
+ 
+commit 0beafcec9a2971d466419d430d13fdb2c4f50d94
+Author: David Smith <dsmith@redhat.com>
+Date:   Tue May 3 13:23:58 2016 -0500
+
+    Fix PR20040 by keeping the task_exe_file function from sleeping.
+    
+    * tapset/linux/task.stp: No longer call get_task_mm()/mmput(), so that the
+      function won't sleep and cause kernel bugs.
+
+diff --git a/tapset/linux/task.stp b/tapset/linux/task.stp
+index 9b204f5..774cf58 100644
+--- a/tapset/linux/task.stp
++++ b/tapset/linux/task.stp
+@@ -795,13 +795,14 @@ function task_exe_file:long(task:long)
+ 		STAP_ERROR ("invalid task struct pointer");
+ 	}
+ 
++	// We'd like to call get_task_mm()/mmput() here, but they can
++	// sleep. So, let's hope incrementing the task's usage (by
++	// calling get_task_struct) is enough to keep the mm around.
+ 	get_task_struct(task);
+-	mm = get_task_mm(task);
+-	put_task_struct(task);
+-	if (mm) {
++	mm = task->mm;
++	if (mm)
+ 		exe_file = stap_find_exe_file(mm);
+-		mmput(mm);
+-	}
++	put_task_struct(task);
+ 
+ 	if (exe_file) {
+ 		STAP_RETURN((unsigned long)exe_file);
