@@ -55,7 +55,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.0
-Release: 3s%{?dist}
+Release: 4s%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
@@ -159,6 +159,7 @@ Patch10: rhbz1242368.patch
 Patch11: rhbz1346112.patch
 Patch12: rhbz1269062.patch
 Patch13: rhbz1337416.patch
+Patch14: rhbz1365550.patch
 
 # Install requirements
 Requires: %{?scl_prefix}systemtap-client = %{version}-%{release}
@@ -415,6 +416,7 @@ cd ..
 %patch11 -p1
 %patch12 -p1
 %patch13 -p1
+%patch14 -p1
 
 %build
 
@@ -1075,6 +1077,9 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Tue Aug 09 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-4s
+- rhbz1365550 PR19874 alarm(60) in staprun system()
+
 * Thu Jul 21 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-3s
 - rhbz1346112 delay tls cert creation
 - rhbz1269062 null elevator
