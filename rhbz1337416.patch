@@ -1,0 +1,578 @@
+commit 056cb27baac1ce3ab4d675dbbe4881afde801ca3
+Author: Frank Ch. Eigler <fche@redhat.com>
+Date:   Wed Jun 22 11:43:33 2016 -0400
+
+    PR18079: support nested autocast / @defined
+    
+    We now perform const-folding & dead-code-elision during the type
+    resolution loop, whenever an autocast expression gets evaluated.  This
+    way, @defined(foo()->mm) type expressions can work as nature intended.
+    
+    This requires @defined() not to be short-circuit evaluated to 0 during
+    a random const_folding process, so a flag is introduced to control its
+    preservation or collapsing.  For the last (assert_resolvability) pass
+    in the type resolution loop, this flag is set to true, so that
+    genuinely unresolvable @defined($expressions) do get mapped to 0 in
+    time for a last elision.
+
+diff --git a/elaborate.cxx b/elaborate.cxx
+index 4a375d9..a1088a1 100644
+--- a/elaborate.cxx
++++ b/elaborate.cxx
+@@ -3984,9 +3984,10 @@ struct const_folder: public update_visitor
+ {
+   systemtap_session& session;
+   bool& relaxed_p;
+-
+-  const_folder(systemtap_session& s, bool& r):
+-    session(s), relaxed_p(r), last_number(0), last_string(0) {}
++  bool collapse_defines_p;
++  
++  const_folder(systemtap_session& s, bool& r, bool collapse_defines = false):
++    session(s), relaxed_p(r), collapse_defines_p(collapse_defines), last_number(0), last_string(0) {}
+ 
+   literal_number* last_number;
+   literal_number* get_number(expression*& e);
+@@ -4506,15 +4507,26 @@ const_folder::visit_ternary_expression (ternary_expression* e)
+ void
+ const_folder::visit_defined_op (defined_op* e)
+ {
+-  // If a @defined makes it this far, then it is, de facto, undefined.
+-
+-  if (session.verbose>2)
+-    clog << _("Collapsing untouched @defined check ") << *e->tok << endl;
+-  relaxed_p = false;
++  // If a @defined makes it this far, then it was not resolved by
++  // previous efforts.  We could assume that therefore it is a big fat
++  // zero, but for the @defined(autocast) case PR18079, this just
++  // means that we didn't know yet.
+ 
+-  literal_number* n = new literal_number (0);
+-  n->tok = e->tok;
+-  n->visit (this);
++  if (collapse_defines_p)
++    {
++      if (session.verbose>2)
++        clog << _("Collapsing untouched @defined check ") << *e->tok << endl;
++       relaxed_p = false;
++       literal_number* n = new literal_number (0);
++       n->tok = e->tok;
++       n->visit (this);
++    }
++  else
++    {
++      if (session.verbose>2)
++        clog << _("Preserving unresolved @defined check ") << *e->tok << endl;
++      provide (e);
++    }
+ }
+ 
+ void
+@@ -5387,6 +5399,21 @@ semantic_pass_types (systemtap_session& s)
+             ti.current_probe = 0;
+             ti.current_function = fd;
+             ti.t = pe_unknown;
++
++            if (ti.assert_resolvability)
++              {
++                // PR18079, rerun the const-folder / dead-block-remover
++                // one last time, in case an unresolvable
++                // @defined($foobar) still persists.  This should map
++                // those to 0.
++                bool relaxed_p;
++                const_folder cf (s, relaxed_p, true); // NB: true
++                cf.replace (fd->body);
++                dead_control_remover dc (s, relaxed_p);
++                fd->body->visit (&dc);
++                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++              }
++              
+             fd->body->visit (& ti);
+             // NB: we don't have to assert a known type for
+             // functions here, to permit a "void" function.
+@@ -5402,6 +5429,16 @@ semantic_pass_types (systemtap_session& s)
+               {
+                 autocast_expanding_visitor aev (ti);
+                 aev.replace (fd->body);
++
++                // PR18079, rerun the const-folder / dead-block-remover
++                // in case autocast evaluation enabled a @defined()
++                bool relaxed_p;
++                const_folder cf (s, relaxed_p);
++                cf.replace (fd->body);
++                dead_control_remover dc (s, relaxed_p);
++                fd->body->visit (&dc);
++                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++
+                 ti.num_available_autocasts = 0;
+               }
+           }
+@@ -5420,6 +5457,21 @@ semantic_pass_types (systemtap_session& s)
+             ti.current_function = 0;
+             ti.current_probe = pn;
+             ti.t = pe_unknown;
++
++            if (ti.assert_resolvability)
++              {
++                // PR18079, rerun the const-folder / dead-block-remover
++                // one last time, in case an unresolvable
++                // @defined($foobar) still persists.  This should map
++                // those to 0.
++                bool relaxed_p;
++                const_folder cf (s, relaxed_p, true); // NB: true
++                cf.replace (pn->body);
++                dead_control_remover dc (s, relaxed_p);
++                pn->body->visit (&dc);
++                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++              }
++            
+             pn->body->visit (& ti);
+             for (unsigned i=0; i < pn->locals.size(); ++i)
+               ti.check_local (pn->locals[i]);
+@@ -5429,6 +5481,16 @@ semantic_pass_types (systemtap_session& s)
+               {
+                 autocast_expanding_visitor aev (ti);
+                 aev.replace (pn->body);
++
++                // PR18079, rerun the const-folder / dead-block-remover
++                // in case autocast evaluation enabled a @defined()
++                bool relaxed_p;
++                const_folder cf (s, relaxed_p);
++                cf.replace (pn->body);
++                dead_control_remover dc (s, relaxed_p);
++                pn->body->visit (&dc);
++                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++
+                 ti.num_available_autocasts = 0;
+               }
+             
+@@ -5907,7 +5969,15 @@ typeresolution_info::visit_target_symbol (target_symbol* e)
+   // later unused-expression-elimination pass didn't get rid of it
+   // either.  So we have a target symbol that is believed to be of
+   // genuine use, yet unresolved by the provider.
+-
++  //
++  // PR18079, or it can happen if a $target expression is nested within
++  // a @defined() test that has not yet been resolved (but can be soon).
++  if (! assert_resolvability)
++    {
++      num_still_unresolved ++;
++      return;
++    }
++  
+   if (session.verbose > 2)
+     {
+       clog << _("Resolution problem with ");
+@@ -5974,7 +6044,15 @@ typeresolution_info::visit_atvar_op (atvar_op* e)
+ void
+ typeresolution_info::visit_defined_op (defined_op* e)
+ {
+-  throw SEMANTIC_ERROR(_("unexpected @defined"), e->tok);
++  // PR18079: if a @defined is still around, it may have a parameter that
++  // wasn't resolvable one way or another earlier.  Maybe an autocast_op.
++  // Let's give it a visit just in case. 
++  e->operand->visit(this);
++
++  if (assert_resolvability)
++    throw SEMANTIC_ERROR(_("unexpected @defined"), e->tok);
++  else
++    num_still_unresolved ++;
+ }
+ 
+ 
+diff --git a/testsuite/semok/autocast14.stp b/testsuite/semok/autocast14.stp
+index 55c06c4..1b32d80 100755
+--- a/testsuite/semok/autocast14.stp
++++ b/testsuite/semok/autocast14.stp
+@@ -1,7 +1,7 @@
+ #! stap -p2
+ 
+-probe oneshot
+-{
++
++@define STUFF %(
+     // precheck, it should work with @cast
+     if (!@defined(@task(0)->mm)) {
+         println($cast_failed_mm)
+@@ -17,4 +17,16 @@ probe oneshot
+     if (@defined(task_current()->systemtap)) {
+         println($autocast_succeeded_systemtap)
+     }
++%)
++
++
++probe oneshot
++{
++  @STUFF
++  foo() // from a function too, to test PR18079 function processing
+ }
++
++function foo ()
++{
++  @STUFF
++}
+\ No newline at end of file
+
+commit 0eda9cd7c9fe3cf7622f6bcf5e9cfba9fdf537dd
+Author: Josh Stone <jistone@redhat.com>
+Date:   Wed Jun 22 12:09:05 2016 -0700
+
+    Increase the difficulty of semok/autocast14.stp
+
+diff --git a/testsuite/semok/autocast14.stp b/testsuite/semok/autocast14.stp
+index 1b32d80..b9488d7 100755
+--- a/testsuite/semok/autocast14.stp
++++ b/testsuite/semok/autocast14.stp
+@@ -17,6 +17,19 @@
+     if (@defined(task_current()->systemtap)) {
+         println($autocast_succeeded_systemtap)
+     }
++
++    // Test that autocast can resolve on the results of @defined
++    mm1 = @choose_defined($nonsense, task_current())->mm;
++    mm2 = @choose_defined(task_current(), $nonsense)->mm;
++    println(mm1 == mm2)
++
++    // Test an even deeper level of @defined
++    if (!@defined(mm1->mmap) || !@defined(mm2->mmap)) {
++        println($autocast_failed_mm_mmap)
++    }
++    if (@defined(mm1->systemtap) || @defined(mm2->systemtap)) {
++        println($autocast_succeeded_mm_systemtap)
++    }
+ %)
+ 
+ 
+@@ -29,4 +42,4 @@ probe oneshot
+ function foo ()
+ {
+   @STUFF
+-}
+\ No newline at end of file
++}
+
+commit 048b546d5645abb6e6ef5148c4ddbd170600e1d3
+Author: Josh Stone <jistone@redhat.com>
+Date:   Fri Jul 8 18:21:49 2016 -0700
+
+    Tweak autocast-defined interactions further
+    
+    - collapse basic @defined($foo) right away.
+    - last-ditch collapse other @defined(expr) to 1 or 0 depending on pe_unknown.
+    - run that last-ditch effort *before* turning on assert_resolvability.
+    - only run extra dead_control_remover for optimized runs
+    - in var_expanding_visitor, pass *any* unchanged expr through, so they
+      may be decided later.  (e.g. for @choose_defined ternaries)
+
+diff --git a/elaborate.cxx b/elaborate.cxx
+index a1088a1..fd6ccce 100644
+--- a/elaborate.cxx
++++ b/elaborate.cxx
+@@ -3987,7 +3987,8 @@ struct const_folder: public update_visitor
+   bool collapse_defines_p;
+   
+   const_folder(systemtap_session& s, bool& r, bool collapse_defines = false):
+-    session(s), relaxed_p(r), collapse_defines_p(collapse_defines), last_number(0), last_string(0) {}
++    session(s), relaxed_p(r), collapse_defines_p(collapse_defines),
++    last_number(0), last_string(0), last_target_symbol(0) {}
+ 
+   literal_number* last_number;
+   literal_number* get_number(expression*& e);
+@@ -4011,6 +4012,9 @@ struct const_folder: public update_visitor
+   void visit_concatenation (concatenation* e);
+   void visit_ternary_expression (ternary_expression* e);
+   void visit_defined_op (defined_op* e);
++
++  target_symbol* last_target_symbol;
++  target_symbol* get_target_symbol(expression*& e);
+   void visit_target_symbol (target_symbol* e);
+ };
+ 
+@@ -4511,15 +4515,35 @@ const_folder::visit_defined_op (defined_op* e)
+   // previous efforts.  We could assume that therefore it is a big fat
+   // zero, but for the @defined(autocast) case PR18079, this just
+   // means that we didn't know yet.
++  int64_t value = 0;
++  bool collapse_this = false;
+ 
+-  if (collapse_defines_p)
++  // We do know that plain target_symbols aren't going anywhere though.
++  if (get_target_symbol (e->operand))
++    {
++      if (session.verbose>2)
++        clog << _("Collapsing target_symbol @defined check ") << *e->tok << endl;
++      collapse_this = true;
++    }
++  else if (collapse_defines_p && relaxed_p)
+     {
+       if (session.verbose>2)
+         clog << _("Collapsing untouched @defined check ") << *e->tok << endl;
+-       relaxed_p = false;
+-       literal_number* n = new literal_number (0);
+-       n->tok = e->tok;
+-       n->visit (this);
++
++      // If we got to an expression with a known type, call it defined.
++      if (e->operand->type != pe_unknown)
++        value = 1;
++      collapse_this = true;
++    }
++
++  if (collapse_this)
++    {
++      // Don't be greedy... we'll only collapse one at a time so type
++      // resolution can have another go at it.
++      relaxed_p = false;
++      literal_number* n = new literal_number (value);
++      n->tok = e->tok;
++      n->visit (this);
+     }
+   else
+     {
+@@ -4529,6 +4553,13 @@ const_folder::visit_defined_op (defined_op* e)
+     }
+ }
+ 
++target_symbol*
++const_folder::get_target_symbol(expression*& e)
++{
++  replace (e);
++  return (e == last_target_symbol) ? last_target_symbol : NULL;
++}
++
+ void
+ const_folder::visit_target_symbol (target_symbol* e)
+ {
+@@ -4545,7 +4576,10 @@ const_folder::visit_target_symbol (target_symbol* e)
+       relaxed_p = false;
+     }
+   else
+-    update_visitor::visit_target_symbol (e);
++    {
++      update_visitor::visit_target_symbol (e);
++      last_target_symbol = e;
++    }
+ }
+ 
+ static int initial_typeres_pass(systemtap_session& s);
+@@ -5400,20 +5434,6 @@ semantic_pass_types (systemtap_session& s)
+             ti.current_function = fd;
+             ti.t = pe_unknown;
+ 
+-            if (ti.assert_resolvability)
+-              {
+-                // PR18079, rerun the const-folder / dead-block-remover
+-                // one last time, in case an unresolvable
+-                // @defined($foobar) still persists.  This should map
+-                // those to 0.
+-                bool relaxed_p;
+-                const_folder cf (s, relaxed_p, true); // NB: true
+-                cf.replace (fd->body);
+-                dead_control_remover dc (s, relaxed_p);
+-                fd->body->visit (&dc);
+-                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
+-              }
+-              
+             fd->body->visit (& ti);
+             // NB: we don't have to assert a known type for
+             // functions here, to permit a "void" function.
+@@ -5431,13 +5451,19 @@ semantic_pass_types (systemtap_session& s)
+                 aev.replace (fd->body);
+ 
+                 // PR18079, rerun the const-folder / dead-block-remover
+-                // in case autocast evaluation enabled a @defined()
+-                bool relaxed_p;
+-                const_folder cf (s, relaxed_p);
+-                cf.replace (fd->body);
+-                dead_control_remover dc (s, relaxed_p);
+-                fd->body->visit (&dc);
+-                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++                // if autocast evaluation enabled a @defined()
++                if (aev.count_replaced_defined_ops() > 0)
++                  {
++                    bool relaxed_p = true;
++                    const_folder cf (s, relaxed_p);
++                    cf.replace (fd->body);
++                    if (! s.unoptimized)
++                      {
++                        dead_control_remover dc (s, relaxed_p);
++                        fd->body->visit (&dc);
++                      }
++                    (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++                  }
+ 
+                 ti.num_available_autocasts = 0;
+               }
+@@ -5458,20 +5484,6 @@ semantic_pass_types (systemtap_session& s)
+             ti.current_probe = pn;
+             ti.t = pe_unknown;
+ 
+-            if (ti.assert_resolvability)
+-              {
+-                // PR18079, rerun the const-folder / dead-block-remover
+-                // one last time, in case an unresolvable
+-                // @defined($foobar) still persists.  This should map
+-                // those to 0.
+-                bool relaxed_p;
+-                const_folder cf (s, relaxed_p, true); // NB: true
+-                cf.replace (pn->body);
+-                dead_control_remover dc (s, relaxed_p);
+-                pn->body->visit (&dc);
+-                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
+-              }
+-            
+             pn->body->visit (& ti);
+             for (unsigned i=0; i < pn->locals.size(); ++i)
+               ti.check_local (pn->locals[i]);
+@@ -5483,13 +5495,19 @@ semantic_pass_types (systemtap_session& s)
+                 aev.replace (pn->body);
+ 
+                 // PR18079, rerun the const-folder / dead-block-remover
+-                // in case autocast evaluation enabled a @defined()
+-                bool relaxed_p;
+-                const_folder cf (s, relaxed_p);
+-                cf.replace (pn->body);
+-                dead_control_remover dc (s, relaxed_p);
+-                pn->body->visit (&dc);
+-                (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++                // if autocast evaluation enabled a @defined()
++                if (aev.count_replaced_defined_ops() > 0)
++                  {
++                    bool relaxed_p = true;
++                    const_folder cf (s, relaxed_p);
++                    cf.replace (pn->body);
++                    if (! s.unoptimized)
++                      {
++                        dead_control_remover dc (s, relaxed_p);
++                        pn->body->visit (&dc);
++                      }
++                    (void) relaxed_p; // we judge success later by num_still_unresolved, not this flag
++                  }
+ 
+                 ti.num_available_autocasts = 0;
+               }
+@@ -5526,9 +5544,27 @@ semantic_pass_types (systemtap_session& s)
+             break; // successfully
+           else if (! ti.assert_resolvability)
+             {
+-              ti.assert_resolvability = true; // last pass, with error msgs
+-              if (s.verbose > 0)
+-                ti.mismatch_complexity = 0; // print every kind of mismatch
++              // PR18079, before we go asserting anything, try to nullify any
++              // still-unresolved @defined ops.
++              bool relaxed_p = true;
++              const_folder cf (s, relaxed_p, true); // NB: true
++
++              for (vector<derived_probe*>::iterator it = s.probes.begin(); it != s.probes.end(); ++it)
++                cf.replace ((*it)->body);
++              for (map<string,functiondecl*>::iterator it = s.functions.begin(); it != s.functions.end(); ++it)
++                cf.replace (it->second->body);
++
++              if (! s.unoptimized)
++                semantic_pass_dead_control (s, relaxed_p);
++
++              if (! relaxed_p)
++                ti.mismatch_complexity = 0; // reset for next pass
++              else
++                {
++                  ti.assert_resolvability = true; // last pass, with error msgs
++                  if (s.verbose > 0)
++                    ti.mismatch_complexity = 0; // print every kind of mismatch
++                }
+             }
+           else
+             { // unsuccessful conclusion
+diff --git a/tapsets.cxx b/tapsets.cxx
+index 069966b..6d82069 100644
+--- a/tapsets.cxx
++++ b/tapsets.cxx
+@@ -2835,7 +2835,8 @@ private:
+ unsigned var_expanding_visitor::tick = 0;
+ 
+ 
+-var_expanding_visitor::var_expanding_visitor (): op()
++var_expanding_visitor::var_expanding_visitor ():
++  replaced_defined_ops(0), op()
+ {
+   // FIXME: for the time being, by default we only support plain '$foo
+   // = bar', not '+=' or any other op= variant. This is fixable, but a
+@@ -2964,6 +2965,7 @@ var_expanding_visitor::visit_delete_statement (delete_statement* s)
+ void
+ var_expanding_visitor::visit_defined_op (defined_op* e)
+ {
++  expression * const old_operand = e->operand;
+   bool resolved = true;
+ 
+   defined_ops.push (e);
+@@ -2999,11 +3001,12 @@ var_expanding_visitor::visit_defined_op (defined_op* e)
+     target_symbol* tsym = dynamic_cast<target_symbol*> (e->operand);
+     if (tsym && tsym->saved_conversion_error) // failing
+       resolved = false;
+-    else if (tsym) // unresolved but not marked failing
++    else if (e->operand == old_operand) // unresolved but not marked failing
+       {
+         // There are some visitors that won't touch certain target_symbols,
+         // e.g. dwarf_var_expanding_visitor won't resolve @cast.  We should
+         // leave it for now so some other visitor can have a chance.
++        defined_ops.pop ();
+         provide (e);
+         return;
+       }
+@@ -3017,6 +3020,7 @@ var_expanding_visitor::visit_defined_op (defined_op* e)
+   literal_number* ln = new literal_number (resolved ? 1 : 0);
+   ln->tok = e->tok;
+   provide (ln);
++  ++replaced_defined_ops;
+ }
+ 
+ 
+diff --git a/tapsets.h b/tapsets.h
+index d630dbb..cb73a7e 100644
+--- a/tapsets.h
++++ b/tapsets.h
+@@ -61,11 +61,6 @@ public:
+ 
+ struct var_expanding_visitor: public update_visitor
+ {
+-  static unsigned tick;
+-  std::stack<defined_op*> defined_ops;
+-  std::set<std::string> valid_ops;
+-  interned_string* op;
+-
+   var_expanding_visitor ();
+   void visit_assignment (assignment* e);
+   void visit_pre_crement (pre_crement* e);
+@@ -73,6 +68,15 @@ struct var_expanding_visitor: public update_visitor
+   void visit_delete_statement (delete_statement* s);
+   void visit_defined_op (defined_op* e);
+ 
++  unsigned count_replaced_defined_ops () { return replaced_defined_ops; }
++
++protected:
++  static unsigned tick;
++  unsigned replaced_defined_ops;
++  std::stack<defined_op*> defined_ops;
++  std::set<std::string> valid_ops;
++  interned_string* op;
++
+   void provide_lvalue_call(functioncall* fcall);
+ 
+ private:
+diff --git a/testsuite/semok/autocast14.stp b/testsuite/semok/autocast14.stp
+index b9488d7..18028e8 100755
+--- a/testsuite/semok/autocast14.stp
++++ b/testsuite/semok/autocast14.stp
+@@ -30,6 +30,13 @@
+     if (@defined(mm1->systemtap) || @defined(mm2->systemtap)) {
+         println($autocast_succeeded_mm_systemtap)
+     }
++
++    // Test that autocast can resolve through nested @defined
++    // (especially that the ternary isn't automatically "defined")
++    mm3 = @choose_defined(@choose_defined($nonsense, $wut), task_current())->mm;
++    mm4 = @choose_defined(@choose_defined($nonsense, task_current()), $wut)->mm;
++    mm5 = @choose_defined(@choose_defined(task_current(), $nonsense), $wut)->mm;
++    println(mm3 == mm4 && mm4 == mm5)
+ %)
+ 
+ 
