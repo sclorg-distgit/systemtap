@@ -55,7 +55,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.0
-Release: 7s%{?dist}
+Release: 8s%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
@@ -162,6 +162,7 @@ Patch13: rhbz1337416.patch
 Patch14: rhbz1365550.patch
 Patch15: rhbz1312169.patch
 Patch16: rhbz1376515.patch
+Patch17: rhbz1378462.patch
 
 # Install requirements
 Requires: %{?scl_prefix}systemtap-client = %{version}-%{release}
@@ -421,6 +422,7 @@ cd ..
 %patch14 -p1
 %patch15 -p1
 %patch16 -p1
+%patch17 -p1
 
 %build
 
@@ -1078,6 +1080,9 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Thu Sep 22 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-8s
+- rhbz1378462 stap-server tls cert creation
+
 * Mon Sep 19 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-7s
 - rhbz1376515 ppc64le probe point / parameter value fix
 
