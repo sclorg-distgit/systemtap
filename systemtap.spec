@@ -55,7 +55,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.0
-Release: 4s%{?dist}
+Release: 7s%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
@@ -160,6 +160,8 @@ Patch11: rhbz1346112.patch
 Patch12: rhbz1269062.patch
 Patch13: rhbz1337416.patch
 Patch14: rhbz1365550.patch
+Patch15: rhbz1312169.patch
+Patch16: rhbz1376515.patch
 
 # Install requirements
 Requires: %{?scl_prefix}systemtap-client = %{version}-%{release}
@@ -417,6 +419,8 @@ cd ..
 %patch12 -p1
 %patch13 -p1
 %patch14 -p1
+%patch15 -p1
+%patch16 -p1
 
 %build
 
@@ -682,11 +686,6 @@ test -e %{_localstatedir}/log/stap-server/log || {
      chmod 644 %{_localstatedir}/log/stap-server/log
      chown stap-server:stap-server %{_localstatedir}/log/stap-server/log
 }
-# If it does not already exist, as stap-server, generate the certificate
-# used for signing and for ssl.
-if test ! -e ~stap-server/.systemtap/ssl/server/stap.cert; then
-   runuser -s /bin/sh - stap-server -c %{_libexecdir}/systemtap/stap-gen-cert >/dev/null
-fi
 # Prepare the service
 %if %{with_systemd}
      # Note, Fedora policy doesn't allow network services enabled by default
@@ -1077,6 +1076,15 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Mon Sep 19 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-7s
+- rhbz1376515 ppc64le probe point / parameter value fix
+
+* Wed Aug 24 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-6
+- rhbz1346112 delay tls cert creation redux
+
+* Thu Aug 11 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-5
+- rhbz1312169 stap-prep debuginfo-install improvement
+
 * Tue Aug 09 2016 Frank Ch. Eigler <fche@redhat.com> - 3.0-4s
 - rhbz1365550 PR19874 alarm(60) in staprun system()
 
