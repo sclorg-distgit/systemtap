@@ -1,0 +1,22 @@
+commit a32189c495cf4dbb71fa497adcaa2ab31aad7021
+Author: Martin Cermak <mcermak@redhat.com>
+Date:   Wed Jun 29 19:03:11 2016 +0200
+
+    Avoid null pointer exception in the ioscheduler.elv_add_request probe.
+    
+    This update makes the ioscheduler.elv_add_request probe gracefully handle
+    situation where $q->elevator is NULL (RHBZ1269062).
+
+diff --git a/tapset/linux/ioscheduler.stp b/tapset/linux/ioscheduler.stp
+index 00d75a5..121fde8 100644
+--- a/tapset/linux/ioscheduler.stp
++++ b/tapset/linux/ioscheduler.stp
+@@ -149,7 +149,7 @@ probe ioscheduler.elv_add_request.tp = kernel.trace("block_rq_insert") ?
+ {
+ 	name = "elv_add_request"
+ 	q =  $q
+-	elevator_name = kernel_string(
++	elevator_name = ($q->elevator == 0) ? "" : kernel_string(
+ 		@choose_defined($q->elevator->type->elevator_name,
+ 			@choose_defined($q->elevator->elevator_type->elevator_name,
+                                         $q->elevator->elevator_name)), "")

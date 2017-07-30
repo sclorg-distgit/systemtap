@@ -1,0 +1,281 @@
+From fced4ba337a4eddb4163994834a122e62c6efdfb Mon Sep 17 00:00:00 2001
+From: Ravi Bangoria <ravi.bangoria@linux.vnet.ibm.com>
+Date: Wed, 14 Sep 2016 13:32:51 +0530
+Subject: [PATCH 1/2] ppc64le: Store correct function entry address in
+ symbol_table
+
+PPC64 ELF ABI v2 has a Global Entry Point and a Local Entry Point for
+the functions. Debuginfo of ELF contains GEP which is same as entrypc
+while symbol table contains GEP and offset, from which we can calculate
+LEP. LEP is used to call function within single CU, when TOC pointer
+update is not required. Placing a probe on LEP catches call from both
+the GEP and the LEP but, by default, systemtap probes on GEP.
+
+For ppc64le, Systemtap stores LEP in symbol table and prioritize symbol
+table over debuginfo. But, storing LEP in symbol table has couple of
+regression effect. As LEP is only required at a time of adding a probe,
+don't store it in symbol table.
+
+No need to prioritize symbol table as well because debuginfo and symbol
+table both will contain Global Entry Point.
+
+Revert commit b4c6a4b1cd00 ("Prioritize symbol table lookup for ppc64le")
+partially.
+
+Signed-off-by: Ravi Bangoria <ravi.bangoria@linux.vnet.ibm.com>
+---
+ tapsets.cxx | 62 +------------------------------------------------------------
+ 1 file changed, 1 insertion(+), 61 deletions(-)
+
+diff --git a/tapsets.cxx b/tapsets.cxx
+index 4167678..a887e1f 100644
+--- a/tapsets.cxx
++++ b/tapsets.cxx
+@@ -2134,18 +2134,6 @@ query_dwarf_inline_instance (Dwarf_Die * die, dwarf_query * q)
+     }
+ }
+ 
+-static bool
+-is_filtered_func_exists (func_info_map_t const& filtered, func_info *fi)
+-{
+-  for (unsigned i = 0; i < filtered.size(); i++)
+-    {
+-      if ((filtered[i].entrypc == fi->entrypc) && (filtered[i].name == fi->name))
+-        return true;
+-    }
+-
+-  return false;
+-}
+-
+ static int
+ query_dwarf_func (Dwarf_Die * func, dwarf_query * q)
+ {
+@@ -2198,37 +2186,7 @@ query_dwarf_func (Dwarf_Die * func, dwarf_query * q)
+           q->dw.function_line (&func.decl_line);
+ 
+           Dwarf_Addr entrypc;
+-
+-          func.entrypc = 0;
+-          Dwarf_Addr bias;
+-          Dwfl_Module *mod = q->dw.module;
+-          Elf* elf = (dwarf_getelf (dwfl_module_getdwarf (mod, &bias))
+-                     ?: dwfl_module_getelf (mod, &bias));
+-
+-          GElf_Ehdr ehdr_mem;
+-          GElf_Ehdr* em = gelf_getehdr (elf, &ehdr_mem);
+-          if (em == NULL) throw SEMANTIC_ERROR (_("Couldn't get elf header"));
+-
+-          /* Giving priority to sym_table for ppc64*/
+-          if ((em->e_machine == EM_PPC64) && ((em->e_flags & EF_PPC64_ABI) == 2)
+-              && (q->dw.mod_info->sym_table))
+-            {
+-              /* The linkage name is the best match for the symbol table. */
+-              const string& linkage_name = dwarf_linkage_name(&func.die)
+-                ?: dwarf_diename(&func.die) ?: (string)func.name;
+-
+-              set<func_info *> fis = q->dw.mod_info->sym_table->lookup_symbol(linkage_name);
+-              for (set<func_info*>::iterator it=fis.begin(); it!=fis.end() ; ++it)
+-                {
+-                  func.entrypc = (*it)->entrypc;
+-                  if (is_filtered_func_exists(q->filtered_functions, &func))
+-                    continue;
+-                  q->filtered_functions.push_back(func);
+-                }
+-            }
+-
+-          /* If not ppc64 or not found in sym_table, try it directly. */
+-          if (!func.entrypc && q->dw.function_entrypc (&entrypc))
++          if (q->dw.function_entrypc (&entrypc))
+             {
+               func.entrypc = entrypc;
+               q->filtered_functions.push_back (func);
+@@ -8448,13 +8406,6 @@ symbol_table::get_from_elf()
+   int syments = dwfl_module_getsymtab(mod);
+   assert(syments);
+   prepare_section_rejection(mod);
+-  Dwarf_Addr bias;
+-  Elf* elf = (dwarf_getelf (dwfl_module_getdwarf (mod, &bias))
+-              ?: dwfl_module_getelf (mod, &bias));
+-
+-  GElf_Ehdr ehdr_mem;
+-  GElf_Ehdr* em = gelf_getehdr (elf, &ehdr_mem);
+-  if (em == NULL) throw SEMANTIC_ERROR (_("Couldn't get elf header"));
+ 
+   for (int i = 1; i < syments; ++i)
+     {
+@@ -8487,18 +8438,7 @@ symbol_table::get_from_elf()
+         continue;
+       interned_string name = n;
+ 
+-     /*
+-      * For ELF ABI v2 on PPC64 LE, we need to adjust sym.st_value corresponding
+-      * to the bits of sym.st_other. These bits will tell us what's the offset
+-      * of the local entry point from the global entry point.
+-      *
+-      * st_other field is currently only used with ABIv2 on ppc64
+-      */
+       Dwarf_Addr entrypc = addr;
+-      if ((em->e_machine == EM_PPC64) && ((em->e_flags & EF_PPC64_ABI) == 2)
+-          && (GELF_ST_TYPE(sym.st_info) == STT_FUNC) && sym.st_other)
+-        entrypc += PPC64_LOCAL_ENTRY_OFFSET(sym.st_other);
+-
+       if (GELF_ST_TYPE(sym.st_info) == STT_FUNC)
+         add_symbol(name, (GELF_ST_BIND(sym.st_info) == STB_WEAK),
+                    reject, addr, entrypc);
+-- 
+1.8.3.1
+
+From 1b83a55a0272f2eb0bdcd5809fb630e1f369d400 Mon Sep 17 00:00:00 2001
+From: Ravi Bangoria <ravi.bangoria@linux.vnet.ibm.com>
+Date: Wed, 14 Sep 2016 13:36:00 +0530
+Subject: [PATCH 2/2] ppc64le: Fix LEP usage for probing
+
+PPC64 ELF ABI v2 has a Global Entry Point and a Local Entry Point for
+the functions. Debuginfo of ELF contains GEP which is same as entrypc
+while symbol table contains GEP and offset, from which we can calculate
+LEP. LEP is used to call function within single CU, when TOC pointer
+update is not required. Placing a probe on LEP catches call from both
+the GEP and the LEP but, by default, systemtap probes on GEP.
+
+Commit b4c6a4b1cd00 ("Prioritize symbol table lookup for ppc64le") solve
+this issue by storing LEP in symbol table and prioritizing symbol table
+over debuginfo for ppc64le.
+
+But there are few regression effect of this patch. Couple of examples
+are given below.
+
+1. If target program is compiled without optimization and user is
+interested in function parameter, systemtap should probe after function
+prologue. But above patch forces probe on LEP and which result in garbage
+value of function parameter will get recorded.
+
+  $ make verbose=1 installcheck RUNTESTFLAGS='at_var.exp -v --debug'
+    ...
+    # of expected passes        1
+    # of unexpected failures    1
+
+2. Probe on shared library function with parameter is failing at Pass 2.
+
+  $ make verbose=1 installcheck RUNTESTFLAGS='exelib.exp -v --debug'
+    ...
+    # of expected passes        10
+    # of unexpected failures    64
+
+3. When symbol_name with offset is used to register kprobe, kernel itself
+will find LEP and adds offset to it. Systemtap using LEP to find offset
+is resulting in offset being added two times.
+  GEP + lep_offset (by systemtap) + lep_offset (by kernel)
+
+This can be solved by calculating LEP only at a time of adding a probe.
+That will make effect of LEP local to that area and won't have any
+regression effect.
+
+After applying patch:
+
+  $ make verbose=1 installcheck RUNTESTFLAGS='at_var.exp -v --debug'
+    ...
+    # of expected passes        2
+
+  $ make verbose=1 installcheck RUNTESTFLAGS='exelib.exp -v --debug'
+    ...
+    # of expected passes        74
+
+Signed-off-by: Ravi Bangoria <ravi.bangoria@linux.vnet.ibm.com>
+---
+ tapsets.cxx | 60 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/tapsets.cxx b/tapsets.cxx
+index a887e1f..30aebb9 100644
+--- a/tapsets.cxx
++++ b/tapsets.cxx
+@@ -1376,6 +1376,59 @@ string path_remove_sysroot(const systemtap_session& sess, const string& path)
+   return retval;
+ }
+ 
++/*
++ * Convert 'Global Entry Point' to 'Local Entry Point'.
++ *
++ * if @gep contains next address after prologue, don't change it.
++ *
++ * For ELF ABI v2 on PPC64 LE, we need to adjust sym.st_value corresponding
++ * to the bits of sym.st_other. These bits will tell us what's the offset
++ * of the local entry point from the global entry point.
++ *
++ * st_other field is currently only used with ABIv2 on ppc64
++ */
++static Dwarf_Addr
++get_lep(dwarf_query *q, Dwarf_Addr gep)
++{
++  Dwarf_Addr bias;
++  Dwfl_Module *mod = q->dw.module;
++  Elf* elf = (dwarf_getelf (dwfl_module_getdwarf (mod, &bias))
++             ?: dwfl_module_getelf (mod, &bias));
++
++  GElf_Ehdr ehdr_mem;
++  GElf_Ehdr* em = gelf_getehdr (elf, &ehdr_mem);
++  if (em == NULL)
++    throw SEMANTIC_ERROR (_("Couldn't get elf header"));
++
++  if (!(em->e_machine == EM_PPC64) || !((em->e_flags & EF_PPC64_ABI) == 2))
++    return gep;
++
++  int syments = dwfl_module_getsymtab(mod);
++  for (int i = 1; i < syments; ++i)
++    {
++      GElf_Sym sym;
++      GElf_Word section;
++      GElf_Addr addr;
++
++#if _ELFUTILS_PREREQ (0, 158)
++      dwfl_module_getsym_info (mod, i, &sym, &addr, &section, NULL, NULL);
++#else
++      dwfl_module_getsym (mod, i, &sym, &section);
++      addr = sym.st_value;
++#endif
++
++      /*
++       * Symbol table contains module_bias + offset. Substract module_bias
++       * to compare offset with gep.
++       */
++      if ((addr - bias) == gep && (GELF_ST_TYPE(sym.st_info) == STT_FUNC)
++          && sym.st_other)
++        return gep + PPC64_LOCAL_ENTRY_OFFSET(sym.st_other);
++    }
++
++  return gep;
++}
++
+ void
+ dwarf_query::add_probe_point(interned_string dw_funcname,
+ 			     interned_string filename,
+@@ -1384,12 +1437,14 @@ dwarf_query::add_probe_point(interned_string dw_funcname,
+ 			     Dwarf_Addr addr)
+ {
+   interned_string reloc_section; // base section for relocation purposes
++  Dwarf_Addr orig_addr = addr;
+   Dwarf_Addr reloc_addr; // relocated
+   interned_string module = dw.module_name; // "kernel" or other
+   interned_string funcname = dw_funcname;
+ 
+   assert (! has_absolute); // already handled in dwarf_builder::build()
+ 
++  addr = get_lep(this, addr);
+   reloc_addr = dw.relocate_address(addr, reloc_section);
+ 
+   // If we originally used the linkage name, then let's call it that way
+@@ -1455,7 +1510,10 @@ dwarf_query::add_probe_point(interned_string dw_funcname,
+ 
+ 	      symbol_table *sym_table = mi->sym_table;
+ 	      func_info *symbol = sym_table->get_func_containing_address(addr);
+-	      Dwarf_Addr offset = addr - symbol->addr;
++
++	      // Do not use LEP to find offset here. When 'symbol_name'
++	      // is used to register probe, kernel itself will find LEP.
++	      Dwarf_Addr offset = orig_addr - symbol->addr;
+ 	      results.push_back (new dwarf_derived_probe(funcname, filename,
+ 							 line, module,
+ 							 reloc_section, addr,
+-- 
+1.8.3.1
+
