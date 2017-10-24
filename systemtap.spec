@@ -1,7 +1,7 @@
 %{?scl:%scl_package systemtap}
 %global sysconfdir %{?scl:%_root_sysconfdir}%{!?scl:%_sysconfdir}
 
-%{!?with_sqlite: %global with_sqlite 1}
+%{!?with_sqlite: %global with_sqlite 0%{?rhel} >= 7}
 %{!?with_docs: %global with_docs 0}
 %{!?with_htmldocs: %global with_htmldocs 0}
 %{!?with_monitor: %global with_monitor 1}
@@ -61,7 +61,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.1
-Release: 1s%{?dist}
+Release: 3s%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
@@ -231,7 +231,7 @@ URL: http://sourceware.org/systemtap/
 # installed.
 Requires: kernel-devel-uname-r
 %{?fedora:Suggests: kernel-devel}
-Requires: gcc make
+Requires: /usr/bin/gcc /usr/bin/make
 # Suggest: kernel-debuginfo
 
 %description devel
@@ -560,8 +560,6 @@ cd ..
 #CPPFLAGS="-I%{_includedir}/dyninst %{optflags}"
 CPPFLAGS="-I%{_includedir} -I%{_includedir}/dyninst %{optflags}"
 export CPPFLAGS
-CXXFLAGS="-std=c++11"
-export CXXFLAGS
 #LDFLAGS="-L%{_libdir}/dyninst"
 LDFLAGS="-L%{_libdir} -L%{_libdir}/dyninst -L%{_libdir}/elfutils"
 export LDFLAGS
@@ -1150,6 +1148,12 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Thu Oct 05 2017 Frank Ch. Eigler <fche@redhat.com> - 3.0-3s
+- restore ppc64 dyninst option; available on .el7 variant
+
+* Wed Oct 04 2017 Frank Ch. Eigler <fche@redhat.com> - 3.0-2s
+- BZ1495069, work around dts docker image repo problems by req /usr/bin/gcc etc.
+
 * Mon Jun 26 2017 Frank Ch. Eigler <fche@redhat.com> - 3.0-1s
 - Upstream release
 
