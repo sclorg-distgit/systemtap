@@ -61,7 +61,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.1
-Release: 1s%{?dist}
+Release: 2s%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
@@ -231,7 +231,7 @@ URL: http://sourceware.org/systemtap/
 # installed.
 Requires: kernel-devel-uname-r
 %{?fedora:Suggests: kernel-devel}
-Requires: gcc make
+Requires: /usr/bin/gcc /usr/bin/make
 # Suggest: kernel-debuginfo
 
 %description devel
@@ -1148,6 +1148,9 @@ done
 #   http://sourceware.org/systemtap/wiki/SystemTapReleases
 
 %changelog
+* Wed Oct 04 2017 Frank Ch. Eigler <fche@redhat.com> - 3.0-2s
+- BZ1495069, work around dts docker image repo problems by req /usr/bin/gcc etc.
+
 * Mon Jun 26 2017 Frank Ch. Eigler <fche@redhat.com> - 3.0-1s
 - Upstream release
 
