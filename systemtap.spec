@@ -73,7 +73,7 @@
 
 Name: %{?scl_prefix}systemtap
 Version: 3.3
-Release: 1%{?dist}
+Release: 1.bs1%{?dist}
 # for version, see also configure.ac
 
 # NB Patch1 is for elfutils, further below
