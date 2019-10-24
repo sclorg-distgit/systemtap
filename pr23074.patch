@@ -1,0 +1,51 @@
+commit 83071bc877b462eacca309fa49c9e8112fc16bdf
+Author: Jafeer Uddin <juddin@redhat.com>
+Date:   Thu May 9 16:18:46 2019 -0400
+
+    PR23074: fix guru mode issue with generated calls to register get/set
+
+diff --git a/elaborate.cxx b/elaborate.cxx
+index 9ebf30b..fcd1d1d 100644
+--- a/elaborate.cxx
++++ b/elaborate.cxx
+@@ -3073,7 +3073,7 @@ public:
+     }
+ 
+   // Don't allow /* guru */ functions unless caller is privileged.
+-  if (!call->tok->location.file->privileged &&
++  if (!call->synthetic && !call->tok->location.file->privileged &&
+       s->tagged_p ("/* guru */"))
+     throw SEMANTIC_ERROR (_("function may not be used unless -g is specified"),
+ 			  call->tok);
+diff --git a/loc2stap.cxx b/loc2stap.cxx
+index c1a48d0..d4fd051 100644
+--- a/loc2stap.cxx
++++ b/loc2stap.cxx
+@@ -1745,6 +1745,7 @@ location_context::handle_GNU_parameter_ref (Dwarf_Op expr)
+   // it and we want to be able to restore the registers back.
+   functioncall *get_ptregs = new functioncall;
+   get_ptregs->tok = e->tok;
++  get_ptregs->synthetic = true;
+   if (this->userspace_p)
+     get_ptregs->function = std::string("__get_uregs");
+   else
+@@ -1870,6 +1871,7 @@ location_context::handle_GNU_parameter_ref (Dwarf_Op expr)
+   // Translation done, restore the pt_regs to its original value
+   functioncall *set_ptregs = new functioncall;
+   set_ptregs->tok = e->tok;
++  set_ptregs->synthetic = true;
+   if (this->userspace_p)
+     set_ptregs->function = std::string("__set_uregs");
+   else
+diff --git a/staptree.h b/staptree.h
+index d63156f..2735808 100644
+--- a/staptree.h
++++ b/staptree.h
+@@ -464,6 +464,7 @@ struct functioncall: public expression
+   interned_string function;
+   std::vector<expression*> args;
+   std::vector<functiondecl*> referents;
++  bool synthetic;
+   functioncall ();
+   void print (std::ostream& o) const;
+   void visit (visitor* u);
